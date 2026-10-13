@@ -1,0 +1,7 @@
+pandas>=1.3
+numpy
+# Optional but strongly recommended: makes the candidate search ~100x faster.
+# Without it the code falls back to pure Python (fine for a few thousand rows).
+rapidfuzz>=3.0
+# Only needed for reading/writing Excel files:
+openpyxl
