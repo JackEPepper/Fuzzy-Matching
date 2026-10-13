@@ -38,15 +38,17 @@ except ImportError:  # pragma: no cover - depends on environment
     _rf_process = None
 
 # In the candidate pass, characters whose weight is below this are removed,
-# so e.g. punctuation or "inc"/"llc" don't drive which candidates are picked.
-PREFILTER_DROP_BELOW = 0.5
+# so e.g. punctuation, "inc"/"llc" or "holdings" don't drive which candidates
+# are picked. (They still count, at their weight, in the final score.)
+PREFILTER_DROP_BELOW = 0.75
 
 ColumnList = Union[None, str, Sequence[str]]
 
 
 def _prefilter_text(text: str, settings: WeightSettings) -> str:
     weights = position_weights(text, settings)
-    kept = "".join(c for c, w in zip(text, weights) if w >= PREFILTER_DROP_BELOW)
+    # Dropped characters become spaces so words don't get glued together.
+    kept = "".join(c if w >= PREFILTER_DROP_BELOW else " " for c, w in zip(text, weights))
     kept = " ".join(kept.split())
     return kept or text
 
@@ -55,25 +57,32 @@ def _find_candidates_batch(
     queries: List[str],
     choices: List[str],
     limit: Optional[int],
-    scorer: str,
+    scorers: Union[str, Sequence[str]],
 ) -> List[List[int]]:
-    """For each query, indices into ``choices`` of the most promising candidates."""
+    """For each query, indices into ``choices`` of the most promising candidates.
+
+    Each scorer contributes its own top ``limit`` candidates; they are combined.
+    """
     if limit is None or limit <= 0 or limit >= len(choices):
         return [list(range(len(choices)))] * len(queries)
+    if isinstance(scorers, str):
+        scorers = [scorers]
 
     if _rf_process is not None:
-        scorer_fn = getattr(_rf_fuzz, scorer)
-        out: List[List[int]] = []
+        out: List[List[int]] = [[] for _ in queries]
         # Score in chunks so memory stays small (chunk x len(choices) bytes).
         chunk = max(1, 20_000_000 // max(1, len(choices)))
-        for start in range(0, len(queries), chunk):
-            scores = _rf_process.cdist(
-                queries[start:start + chunk], choices,
-                scorer=scorer_fn, dtype=np.uint8, workers=-1,
-            )
-            top = np.argpartition(-scores.astype(np.int16), limit - 1, axis=1)[:, :limit]
-            out.extend(top.tolist())
-        return out
+        for scorer in scorers:
+            scorer_fn = getattr(_rf_fuzz, scorer)
+            for start in range(0, len(queries), chunk):
+                scores = _rf_process.cdist(
+                    queries[start:start + chunk], choices,
+                    scorer=scorer_fn, dtype=np.uint8, workers=-1,
+                )
+                top = np.argpartition(-scores.astype(np.int16), limit - 1, axis=1)[:, :limit]
+                for k, row in enumerate(top.tolist(), start):
+                    out[k].extend(row)
+        return [list(dict.fromkeys(c)) for c in out]  # de-duplicate, keep order
 
     # Pure-Python fallback (much slower) if rapidfuzz isn't installed.
     out = []
@@ -123,7 +132,7 @@ def match_dataframes(
     top_n: int = 1,
     min_score: float = 0.0,
     candidates_per_row: Optional[int] = 10,
-    prefilter_scorer: str = "token_sort_ratio",
+    prefilter_scorer: Union[str, Sequence[str]] = ("token_sort_ratio", "ratio"),
     block_on: Optional[Tuple[str, str]] = None,
     keep_left: ColumnList = None,
     keep_right: ColumnList = None,
@@ -141,9 +150,10 @@ def match_dataframes(
     top_n : how many matches to return per left row.
     min_score : drop matches scoring below this (0-100).
     candidates_per_row : size of the fast candidate pass (None = compare all).
-    prefilter_scorer : rapidfuzz.fuzz scorer used for the candidate pass:
-        "token_sort_ratio" (default, fast, ignores word order), "ratio",
-        "token_set_ratio", "partial_ratio" or "WRatio" (best, but slow).
+    prefilter_scorer : rapidfuzz.fuzz scorer name(s) for the candidate pass;
+        with several, each adds its own top candidates. Options:
+        "token_sort_ratio" (ignores word order), "ratio" (plain, handles
+        glued words), "token_set_ratio", "partial_ratio", "WRatio" (slow).
     block_on : optional (left_col, right_col); only rows with EXACTLY equal
         values in these columns are compared (e.g. same state / zip code).
         Greatly speeds up big jobs.

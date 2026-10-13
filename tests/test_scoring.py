@@ -82,3 +82,48 @@ def test_score_is_between_0_and_100():
     s = WeightSettings(word_weights={"x": 0.01})
     for a, b in [("x", "yyyy"), ("abc", "xyz"), ("a", "")]:
         assert 0.0 <= similarity(a, b, s) <= 100.0
+
+
+def test_dotted_acronyms_collapse_but_decimals_do_not():
+    s = WeightSettings()
+    assert normalize("Vtno L.L.C.", s) == "vtno llc"
+    assert normalize("J.P. Morgan", s) == "jp morgan"
+    assert normalize("3.5 Ltd", s) == "3.5 ltd"
+    assert normalize("L.L.C.", WeightSettings(collapse_acronyms=False)) == "l.l.c."
+
+
+def test_word_replacements_whole_words_only_and_multiword():
+    s = WeightSettings(word_replacements={"co": "company", "intl": "international"})
+    assert normalize("Costco Intl.", s) == "costco international."
+    assert normalize("Smith Co.", s) == "smith company."
+    s = WeightSettings(replacements={"&": " and "}, word_replacements={"and co": "co"})
+    assert normalize("Smith & Co.", s) == "smith co."
+
+
+def test_transposition_counts_as_one_edit():
+    assert weighted_distance("jhonson", "johnson", WeightSettings()) == 1
+    assert weighted_distance("jhonson", "johnson", WeightSettings(transposition_cost=None)) == 2
+
+
+def test_sorted_words_option_and_penalty():
+    plain = WeightSettings()
+    sorted_words = WeightSettings(compare_sorted_words=True, sorted_words_penalty=5)
+    assert similarity("Smith Jones", "Jones Smith", plain) < 60
+    assert similarity("Smith Jones", "Jones Smith", sorted_words) == 95.0
+    assert similarity("Smith Jones", "Smith Jones", sorted_words) == 100.0
+
+
+def test_separators_take_weight_of_neighbouring_low_weight_word():
+    s = WeightSettings(char_class_weights={"whitespace": 0.2, "punctuation": 0.1},
+                       word_weights={"inc": 0.05})
+    w = position_weights("ibm, inc.", s)
+    # "ibm" full weight; ", " and "inc" and "." all scaled by 0.05
+    assert w[:3] == [1.0, 1.0, 1.0]
+    assert all(x <= 0.05 for x in w[3:])
+    assert similarity("IBM", "IBM, Inc.", s) > 90
+
+
+def test_chained_word_replacements():
+    s = WeightSettings(replacements={"&": " and "},
+                       word_replacements={"company": "co", "and co": "co"})
+    assert normalize("Soylent and Company", s) == normalize("Soylent & Co", s) == "soylent co"

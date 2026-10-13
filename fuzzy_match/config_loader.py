@@ -34,13 +34,18 @@ def settings_from_config(cfg: ModuleType) -> WeightSettings:
         case_sensitive=_get(cfg, "CASE_SENSITIVE", False),
         strip_accents=_get(cfg, "STRIP_ACCENTS", True),
         collapse_whitespace=_get(cfg, "COLLAPSE_WHITESPACE", True),
+        collapse_acronyms=_get(cfg, "COLLAPSE_ACRONYMS", True),
         replacements=dict(_get(cfg, "REPLACEMENTS", {})),
+        word_replacements=dict(_get(cfg, "WORD_REPLACEMENTS", {})),
         regex_replacements=dict(_get(cfg, "REGEX_REPLACEMENTS", {})),
         default_char_weight=_get(cfg, "DEFAULT_CHARACTER_WEIGHT", 1.0),
         char_class_weights=dict(_get(cfg, "CHARACTER_CLASS_WEIGHTS", {})),
         char_weights=dict(_get(cfg, "CHARACTER_WEIGHTS", {})),
         word_weights=dict(_get(cfg, "WORD_WEIGHTS", {})),
         substitution_costs=dict(_get(cfg, "SUBSTITUTION_COSTS", {})),
+        transposition_cost=_get(cfg, "TRANSPOSITION_COST", 1.0),
+        compare_sorted_words=_get(cfg, "COMPARE_SORTED_WORDS", False),
+        sorted_words_penalty=_get(cfg, "SORTED_WORDS_PENALTY", 5.0),
     )
 
 
@@ -52,7 +57,7 @@ def match_kwargs_from_config(cfg: ModuleType) -> Dict[str, Any]:
         top_n=_get(cfg, "TOP_N", 1),
         min_score=_get(cfg, "MIN_SCORE", 0),
         candidates_per_row=_get(cfg, "CANDIDATES_PER_ROW", 10),
-        prefilter_scorer=_get(cfg, "PREFILTER_SCORER", "token_sort_ratio"),
+        prefilter_scorer=_get(cfg, "PREFILTER_SCORER", ("token_sort_ratio", "ratio")),
         block_on=_get(cfg, "BLOCK_ON", None),
         keep_left=_get(cfg, "KEEP_LEFT_COLUMNS", None),
         keep_right=_get(cfg, "KEEP_RIGHT_COLUMNS", None),

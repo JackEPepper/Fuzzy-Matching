@@ -117,3 +117,18 @@ def test_cli_try(capsys):
     import run_match
     assert run_match.main(["--try", "Acme, Inc.", "ACME INC"]) == 0
     assert "score:" in capsys.readouterr().out
+
+
+def test_prefilter_keeps_word_boundaries():
+    s = WeightSettings(char_class_weights={"whitespace": 0.2, "punctuation": 0.1})
+    assert matcher_mod._prefilter_text("turner manufacturing, corp", s) == "turner manufacturing corp"
+
+
+def test_multiple_prefilter_scorers_find_glued_and_reordered_names():
+    right = pd.DataFrame({"company": [f"Filler Company {i}" for i in range(50)]
+                          + ["Reed Electric", "Baker Packaging"]})
+    left = pd.DataFrame({"name": ["ReedElectric", "Packaging Baker"]})
+    s = WeightSettings(char_class_weights={"whitespace": 0.2}, compare_sorted_words=True)
+    out = match_dataframes(left, right, "name", "company", settings=s,
+                           candidates_per_row=2, show_progress=False)
+    assert list(out.right_company) == ["Reed Electric", "Baker Packaging"]

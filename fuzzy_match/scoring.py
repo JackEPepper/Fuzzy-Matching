@@ -44,9 +44,13 @@ class WeightSettings:
     case_sensitive: bool = False
     strip_accents: bool = True
     collapse_whitespace: bool = True
+    # "L.L.C." -> "LLC", "J.P." -> "JP" (dots between single letters removed)
+    collapse_acronyms: bool = True
 
     # Plain-text replacements applied before scoring, e.g. {"&": " and "}
     replacements: Dict[str, str] = field(default_factory=dict)
+    # Whole-word replacements, e.g. {"incorporated": "inc", "intl": "international"}
+    word_replacements: Dict[str, str] = field(default_factory=dict)
     # Regex replacements applied after plain ones, e.g. {r"\bst\b": "street"}
     regex_replacements: Dict[str, str] = field(default_factory=dict)
 
@@ -61,6 +65,15 @@ class WeightSettings:
     # Cost multiplier for substituting specific character pairs, e.g.
     # {("0", "o"): 0.2}. Pairs are symmetric. Default multiplier is 1.0.
     substitution_costs: Dict[Tuple[str, str], float] = field(default_factory=dict)
+    # Cost multiplier for swapping two neighbouring characters ("teh" vs "the").
+    # 1.0 = a swap counts as ONE edit; None = plain Levenshtein (two edits).
+    transposition_cost: Optional[float] = 1.0
+    # Also compare the words sorted alphabetically and keep the better score,
+    # so "Smith & Jones" == "Jones & Smith". Roughly doubles scoring time.
+    compare_sorted_words: bool = False
+    # Points subtracted when a pair only scores well AFTER sorting the words,
+    # so an exact-order match always ranks above a reordered one.
+    sorted_words_penalty: float = 5.0
 
     def __post_init__(self) -> None:
         # Make the lookup keys match the normalized text (e.g. lower-case).
@@ -68,6 +81,18 @@ class WeightSettings:
         self.char_weights = {fold(k): float(v) for k, v in self.char_weights.items()}
         self.word_weights = {fold(k): float(v) for k, v in self.word_weights.items()}
         self.replacements = {fold(k): v for k, v in self.replacements.items()}
+        # Keys are stored with single spaces; multi-word keys match any spacing.
+        self.word_replacements = {
+            " ".join(fold(k).split()): v for k, v in self.word_replacements.items() if k.strip()
+        }
+        self._word_regex = None
+        if self.word_replacements:
+            alternatives = sorted(self.word_replacements, key=len, reverse=True)
+            self._word_regex = re.compile(
+                r"(?<!\w)(?:"
+                + "|".join(r"\s+".join(map(re.escape, w.split())) for w in alternatives)
+                + r")(?!\w)"
+            )
         self._sub_lookup: Dict[str, Dict[str, float]] = {}
         for (a, b), cost in self.substitution_costs.items():
             a, b = fold(a), fold(b)
@@ -85,6 +110,8 @@ class WeightSettings:
 # --------------------------------------------------------------------------- #
 _WHITESPACE = re.compile(r"\s+")
 _WORD = re.compile(r"\w+")
+# Two or more single LETTERS separated by dots: "l.l.c.", "u.s.a", "j.p." (not "3.5")
+_DOTTED_ACRONYM = re.compile(r"(?<!\w)(?:[^\W\d_]\.)+[^\W\d_](?!\w)\.?")
 
 
 def is_missing(value) -> bool:
@@ -113,6 +140,18 @@ def normalize(value, settings: WeightSettings) -> str:
 
     for old, new in settings.replacements.items():
         text = text.replace(old, new)
+    if settings.collapse_acronyms:
+        text = _DOTTED_ACRONYM.sub(lambda m: m.group().replace(".", ""), text)
+    if settings._word_regex is not None:
+        lookup = settings.word_replacements
+        # Repeat so chained rules work: "and company" -> "and co" -> "co"
+        for _ in range(5):
+            new_text = settings._word_regex.sub(
+                lambda m: lookup[" ".join(m.group().split())], text
+            )
+            if new_text == text:
+                break
+            text = new_text
     for pattern, new in settings._compiled_regex:
         text = pattern.sub(new, text)
 
@@ -156,11 +195,25 @@ def position_weights(text: str, settings: WeightSettings) -> List[float]:
 
     weights = [char_weight(c, settings) for c in text]
     if settings.word_weights:
-        for m in _WORD.finditer(text):
-            multiplier = settings.word_weights.get(m.group())
-            if multiplier is not None:
+        words = list(_WORD.finditer(text))
+        multipliers = [settings.word_weights.get(m.group(), 1.0) for m in words]
+        for m, mult in zip(words, multipliers):
+            if mult != 1.0:
                 for i in range(m.start(), m.end()):
-                    weights[i] *= multiplier
+                    weights[i] *= mult
+        # Spaces/punctuation between words take the smaller multiplier of the
+        # words on either side, so in "acme, inc." the ", " and "." count as
+        # little as "inc" itself.
+        for k in range(len(words) + 1):
+            start = words[k - 1].end() if k > 0 else 0
+            end = words[k].start() if k < len(words) else len(text)
+            if start >= end:
+                continue
+            neighbours = multipliers[max(0, k - 1):k + 1]
+            mult = min(neighbours) if neighbours else 1.0
+            if mult != 1.0:
+                for i in range(start, end):
+                    weights[i] *= mult
 
     settings._weight_cache[text] = weights
     return weights
@@ -184,11 +237,14 @@ def weighted_distance(
 
     sub_lookup = settings._sub_lookup
     empty: Dict[str, float] = {}
+    swap = settings.transposition_cost
 
-    # Classic dynamic-programming table, kept one row at a time.
+    # Classic dynamic-programming table, kept a couple of rows at a time.
+    # prev[j] = distance between a[:i] and b[:j]; prev2 is the row before.
     prev = [0.0]
     for w in wb:
         prev.append(prev[-1] + w)
+    prev2: List[float] = prev
 
     for i, ca in enumerate(a):
         w_a = wa[i]
@@ -207,13 +263,28 @@ def weighted_distance(
                 best = delete
             if insert < best:
                 best = insert
+            # Adjacent swap: "ab" <-> "ba"
+            if swap is not None and i and j and ca == b[j - 1] and a[i - 1] == cb and ca != cb:
+                transpose = prev2[j - 1] + swap * (w_a if w_a > w_b else w_b)
+                if transpose < best:
+                    best = transpose
             cur.append(best)
-        prev = cur
+        prev2, prev = prev, cur
     return prev[-1]
 
 
 def similarity_normalized(a: str, b: str, settings: WeightSettings) -> float:
     """0-100 similarity between two strings that are ALREADY normalized."""
+    score = _similarity_once(a, b, settings)
+    if settings.compare_sorted_words and score < 100.0 and (" " in a or " " in b):
+        sorted_a = " ".join(sorted(a.split()))
+        sorted_b = " ".join(sorted(b.split()))
+        sorted_score = _similarity_once(sorted_a, sorted_b, settings)
+        score = max(score, sorted_score - settings.sorted_words_penalty)
+    return score
+
+
+def _similarity_once(a: str, b: str, settings: WeightSettings) -> float:
     if a == b:
         return 100.0
     wa = position_weights(a, settings)
