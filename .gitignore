@@ -1,0 +1,21 @@
+# --- Keep proprietary data OUT of this public repo ---------------------------
+*.csv
+*.tsv
+*.xlsx
+*.xlsm
+*.xls
+*.parquet
+!examples/*.csv
+output/
+data/
+# Your private settings (copy config.py to my_config.py)
+my_config*.py
+*_private.py
+
+# --- Python -------------------------------------------------------------------
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+venv/
+.ipynb_checkpoints/
